@@ -1,0 +1,11 @@
+# 编译产物
+server
+*.o
+*.obj
+*.exe
+
+# 日志
+Log/
+
+# 编辑器
+.vscode/
