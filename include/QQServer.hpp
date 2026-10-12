@@ -14,7 +14,7 @@
 #include "QQDatabase.hpp"
 #include "Conn.hpp"
 
-#define THREAD_NUM 20
+#define THREAD_NUM 30
 
 class QQServer
 {
