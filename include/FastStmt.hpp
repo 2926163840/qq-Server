@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <iostream>
+#include <variant>
 
 class FastStmt
 {
@@ -52,6 +53,32 @@ public:
         mysql_stmt_reset(stmt);
         // 绑定入参
         BindAll(std::forward<Args>(args)...);
+        if (!vpushbind.empty())
+            if (mysql_stmt_bind_param(stmt, vpushbind.data()) != 0)
+                return false;
+        return mysql_stmt_execute(stmt) == 0;
+    }
+    // 批量绑定：每行是字段列表，字段是 long long 值 或 std::string* 指针（不拷字符串）
+    bool ExecuteBatch(const std::vector<std::vector<std::variant<long long, std::string*>>>& rows)
+    {
+        vpushbind.clear();
+        push = true;
+        mysql_stmt_reset(stmt);
+        for (const auto &row : rows)
+        {
+            for (const auto &field : row)
+            {
+                if (std::holds_alternative<long long>(field))
+                {
+                    const long long &v = std::get<long long>(field);
+                    BindPush(const_cast<long long*>(&v));
+                }
+                else
+                {
+                    BindPush(std::get<std::string*>(field));
+                }
+            }
+        }
         if (!vpushbind.empty())
             if (mysql_stmt_bind_param(stmt, vpushbind.data()) != 0)
                 return false;

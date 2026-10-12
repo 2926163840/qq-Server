@@ -9,3 +9,7 @@ Log/
 
 # 编辑器
 .vscode/
+
+#压测脚本：只提交源码，忽略编译产物
+testcode/*
+!testcode/*.cpp

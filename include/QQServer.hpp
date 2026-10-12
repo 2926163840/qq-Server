@@ -12,8 +12,9 @@
 #include "Log.hpp"
 #include "QQThreadPool.hpp"
 #include "QQDatabase.hpp"
+#include "Conn.hpp"
 
-#define THREAD_NUM 3
+#define THREAD_NUM 20
 
 class QQServer
 {
@@ -71,10 +72,20 @@ public:
         QQServer *server = static_cast<QQServer *>(ptr);
         // 获取相应线程(顺序获取)
         QQThread *thread = server->pool->getThread();
+        // 连接对象
+        std::shared_ptr<Conn> conn = std::make_shared<Conn>();
+        // 连接对象所属线程
+        conn->thread = thread;
+        // 连接对象所属base
+        conn->base = thread->getBase();
+        // 初始化最后活跃时间(心跳保活)
+        conn->last_active = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
         // 创建socket事件
-        struct bufferevent *bev = bufferevent_socket_new(thread->getBase(), fd, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
+        conn->bev = bufferevent_socket_new(thread->getBase(), fd, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
         // 创建失败关闭套接字
-        if (bev == nullptr)
+        if (conn->bev == nullptr)
         {
 
             lg()(Error, SCREEN, "QQServer acceptr bufferevent_socket_new failed{}", fd);
@@ -84,9 +95,19 @@ public:
         // 成功提示信息
         else
             lg()(Info, SCREEN, "new client connected");
+
+        // 写任务唤醒事件
+        conn->notify_ev = event_new(conn->base, -1, EV_PERSIST, QQThread::drain_cb, conn.get());
+        event_add(conn->notify_ev, NULL);
+        // 放入连接哈希表中保活
+        {
+            QQInfo *info = server->pool->getInfo();
+            std::lock_guard<std::shared_mutex> lock(info->online_mutex);
+            info->conns[conn.get()] = conn;
+        }
         // 设置回调函数
-        bufferevent_setcb(bev, QQThread::readCallBack, QQThread::writeCallBack, QQThread::eventCallBack, thread);
+        bufferevent_setcb(conn->bev, QQThread::readCallBack, QQThread::writeCallBack, QQThread::eventCallBack, conn.get());
         // 开启读事件监听
-        bufferevent_enable(bev, EV_READ);
+        bufferevent_enable(conn->bev, EV_READ);
     }
 };

@@ -4,6 +4,8 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <unordered_set>
+#include <chrono>
 #include <json/json.h>
 
 #include "FastStmt.hpp"
@@ -200,7 +202,6 @@ public:
             lg()(Error, SCREEN, "QQDatabase handleAddFriendResult select FetchRow failed:{}", stmt.GetError());
             return stmt.GetError();
         }
-        std::cout << "raccount" << raccount << "\nsaccount" << saccount << std::endl;
         // 获取同步序列
         long long requestsyncseq = 0;
         requestsyncseq = syncsac.getSeq(rid);
@@ -417,6 +418,7 @@ public:
                     // 重新开启自动提交
                     mysql_autocommit(mysql, 1);
                     lg()(Error, SCREEN, "QQDatabase handleAddFriendResult getconvseq failed");
+                    return GETSEQFAILED;
                 }
                 // 获取成功
                 firstgreet = convsac.initSeq(convid, firstgreet);
@@ -465,8 +467,11 @@ public:
 
             senderdata["friendgreet"] = "我同意了你的好友请求,我们可以开始聊天了!"; // 好友招呼
             senderdata["friendconvseq"] = Json::Int64(secondgreet);                 // 好友招呼信息序列
+            senderdata["friendgreetuuid"] = seconduuid;                             // 好友招呼信息uuid
 
             senderdata["sendtime"] = Json::Int64(sendtime); // 招呼消息发送时间
+            senderdata["uuid"] = firstuuid;                 // 招呼消息uuid
+            senderdata["status"] = 1;                       // 招呼消息状态
 
             senderdata["friendaccount"] = saccount;   // 好友账号
             senderdata["friendname"] = sname;         // 好友用户名
@@ -484,8 +489,11 @@ public:
 
             recverdata["friendgreet"] = verification;              // 好友验证消息
             recverdata["friendconvseq"] = Json::Int64(firstgreet); // 好友验证消息序列
+            recverdata["friendgreetuuid"] = firstuuid;             // 好友招呼信息uuid
 
             recverdata["sendtime"] = Json::Int64(sendtime); // 好友验证消息发送时间
+            recverdata["uuid"] = seconduuid;                // 招呼消息uuid
+            recverdata["status"] = 1;                       // 招呼消息状态
 
             recverdata["friendaccount"] = raccount;    // 好友账号
             recverdata["friendname"] = rname;          // 好友用户名
@@ -582,8 +590,25 @@ public:
         // 通知状态
         int8_t status = static_cast<int8_t>(FriendNoticeStatus::PENDING);
         // 执行sql语句
-        int ret = stmt.Execute(&requestid, &recvid, &verification, &remark, &identity, &uuid, &sendtime,
-                               &status, &requestid, &recvid, &status, &requestid, &recvid);
+        if (!stmt.Execute(&requestid, &recvid, &verification, &remark, &identity, &uuid, &sendtime,
+                          &status, &requestid, &recvid, &status, &requestid, &recvid))
+        {
+            unsigned int err = stmt.GetError(); // mysql_stmt_errno，真正的错误码
+            if (err == 1062)                    // 1062 = ER_DUP_ENTRY，uuid 唯一键冲突
+            {
+                // 回滚
+                mysql_rollback(mysql);
+                // 重新自动提交
+                mysql_autocommit(mysql, 1);
+                return INTERCEPTPACKET; // 客户端重试的重复包，拦截，不报错
+            }
+            // 回滚
+            mysql_rollback(mysql);
+            // 重新自动提交
+            mysql_autocommit(mysql, 1);
+            lg()(Error, SCREEN, "QQDatabase pushAddFriendRequest insertrequest Execute failed:{}", err);
+            return err;
+        }
         // 条件不满足说明已经是好友或重复提交申请
         if (mysql_affected_rows(mysql) == 0)
         {
@@ -592,24 +617,6 @@ public:
             // 重新自动提交
             mysql_autocommit(mysql, 1);
             return REQUESTREPETITION;
-        }
-        //  预处理sql语句(uuid重复 拦截了重复包)
-        if (ret == 1062)
-        {
-            // 回滚
-            mysql_rollback(mysql);
-            // 重新自动提交
-            mysql_autocommit(mysql, 1);
-            return INTERCEPTPACKET;
-        }
-        else if (!ret)
-        {
-            // 回滚
-            mysql_rollback(mysql);
-            // 重新自动提交
-            mysql_autocommit(mysql, 1);
-            lg()(Error, SCREEN, "QQDatabase pushAddFriendRequest insertrequest Execute failed:{}", stmt.GetError());
-            return stmt.GetError();
         }
         // 获取最后一次插入也就是请求的主键id
         long long requestkey = mysql_stmt_insert_id(stmt.GetStmt());
@@ -775,42 +782,180 @@ public:
         // 消息状态更改成功
         return MESSAGESENDSUCCESS;
     }
-    // 添加信息
-    unsigned int addMessage(Json::Value &v, long long sendid, int &index)
+    // 批量消息行：入库前 convseq/sendtime 待分配，putflag 标记最终是否入库成功
+    struct MsgRow
     {
-        // 获取句柄
+        long long convid, sendid, convseq = -1, sendtime = -1;
+        std::string content, uuid;
+        bool putflag = false; // true=新插入成功要回执，false=序列失败/重复包不回执
+    };
+    // // 添加聊天信息
+    // unsigned int addMessage(long long &convid, long long &sendid, std::string &content, std::string &uuid, long long &convseq, long long &sendtime, int &index)
+    // {
+    //     // 获取句柄
+    //     MYSQL *mysql = getMysql(index);
+    //     // 创建Faststmt对象
+    //     FastStmt stmt(mysql);
+    //     // 初始化失败
+    //     if (!stmt.IsInit())
+    //     {
+    //         lg()(Error, SCREEN, "QQDatabase addMessage IsInit failed:{}", mysql_errno(mysql));
+    //         return mysql_errno(mysql);
+    //     }
+    //     // 预处理sql失败
+    //     if (!stmt.PrePareSql("insert into message(convid,convseq,sendid,content,sendtime,uuid) values(?,?,?,?,?,?);"))
+    //     {
+    //         lg()(Error, SCREEN, "QQDatabase addMessage PrePareSql failed:{}", stmt.GetError());
+    //         return stmt.GetError();
+    //     }
+    //     // 获取会话序列(懒加载)
+    //     convseq = convsac.getSeq(convid);
+    //     if (convseq == -1)
+    //     {
+    //         // 懒加载最多三次
+    //         for (int i = 0; i < 3; i++)
+    //         {
+    //             convseq = getConvSeq(convid, index);
+    //             if (convseq != 1)
+    //                 break;
+    //         }
+    //         // 三次均失败当入库失败
+    //         if (convseq == -1)
+    //         {
+    //             return GETSEQFAILED;
+    //         }
+    //         // 加载成功
+    //         convseq = convsac.initSeq(convid, convseq);
+    //     }
+    //     // 获取当前时间戳
+    //     auto now = std::chrono::system_clock::now();
+    //     sendtime = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    //     // 执行sql语句
+    //     if (!stmt.Execute(&convid, &convseq, &sendid, &content, &sendtime, &uuid))
+    //     {
+    //         unsigned int err = stmt.GetError(); // mysql_stmt_errno，真正的错误码
+    //         if (err == 1062)                    // 1062 uuid 唯一键冲突
+    //             return INTERCEPTPACKET;         // 拦截客户端重试的重复包
+    //         lg()(Error, SCREEN, "QQDatabase addMessage Execute failed:{}", err);
+    //         return err;
+    //     }
+    //     // 消息入库成功
+    //     return MESSAGEINMYSQL;
+    // }
+    // 批量入库（同步）：分配序列 + IN查重区分重复包 + 批量INSERT，最后标 putflag
+    unsigned int addMessages(std::vector<MsgRow> &rows, int index)
+    {
         MYSQL *mysql = getMysql(index);
-        // 创建Faststmt对象
         FastStmt stmt(mysql);
-        // 初始化失败
         if (!stmt.IsInit())
-        {
-            lg()(Error, SCREEN, "QQDatabase addMessage IsInit failed:{}", mysql_errno(mysql));
             return mysql_errno(mysql);
-        }
-        // 预处理sql失败
-        if (!stmt.PrePareSql("insert into message(sendid,recvid,content) values(?,?,?);"))
+
+        long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+
+        // 1. 分配序列 + 拼 SQL（融合），只收集序列成功的
+        std::string sql = "insert into message(convid,convseq,sendid,content,sendtime,uuid) values ";
+        // 批量绑定的字段
+        std::vector<std::vector<std::variant<long long, std::string *>>> batch;
+        std::vector<MsgRow *> insert_rows;
+        bool first = true;
+
+        // 获取每条消息的会话序列
+        for (auto &row : rows)
         {
-            lg()(Error, SCREEN, "QQDatabase addMessage PrePareSql failed:{}", stmt.GetError());
+            row.convseq = convsac.getSeq(row.convid);
+            if (row.convseq == -1)
+            {
+                long long cur = -1;
+                for (int i = 0; i < 3 && cur == -1; i++) // 重试三次
+                    cur = getConvSeq(row.convid, index);
+                // 序列分配失败
+                if (cur == -1)
+                {
+                    row.putflag = false;
+                    continue;
+                }
+                row.convseq = convsac.initSeq(row.convid, cur);
+            }
+            row.sendtime = now;
+
+            if (!first)
+                sql += ",";
+            sql += "(?,?,?,?,?,?)";
+            first = false;
+            // 构造要绑定的字段
+            batch.push_back({row.convid, row.convseq, row.sendid, &row.content, row.sendtime, &row.uuid});
+            // 待插入消息
+            insert_rows.push_back(&row);
+        }
+        // 没有要绑定的字段全部序列分配失败或没有要插入的数据
+        if (batch.empty())
+            return MESSAGEINMYSQL;
+
+        // IN 查重：查出已存在的 uuid = 重复包
+        std::string insql = "select uuid from message where uuid in (";
+        for (size_t i = 0; i < batch.size(); i++)
+        {
+            if (i)
+                insql += ",";
+            insql += "?";
+        }
+        insql += ")";
+
+        // 重复包容器
+        std::unordered_set<std::string> existing;
+        if (stmt.PrePareSql(insql.c_str()))
+        {
+            std::vector<std::vector<std::variant<long long, std::string *>>> inbatch;
+            // 获取所有准备要插入的uuid
+            for (auto &v : batch)
+                inbatch.push_back({std::get<std::string *>(v[5])});
+            // 批量绑定
+            if (stmt.ExecuteBatch(inbatch))
+            {
+                char uuidbuf[64] = {0};
+                // 取出来的数据表示此uuid已经存在要插入的是重复包
+                if (stmt.BindResult(uuidbuf))
+                {
+                    stmt.StoreResult();
+                    while (stmt.FetchRow() == 0)
+                        existing.insert(uuidbuf);
+                }
+            }
+        }
+
+        // 3.标 putflag：重复包=false，新消息=true
+        for (auto *r : insert_rows)
+            r->putflag = (existing.find(r->uuid) == existing.end());
+
+        // 4.批量 INSERT：只插 putflag=true 的新消息
+        std::vector<std::vector<std::variant<long long, std::string *>>> insert_batch;
+        for (size_t i = 0; i < insert_rows.size(); i++)
+            // 插入非重复包
+            if (insert_rows[i]->putflag)
+                insert_batch.push_back(batch[i]);
+
+        if (insert_batch.empty())
+            return MESSAGEINMYSQL;
+
+        if (!stmt.PrePareSql(sql.c_str()) || !stmt.ExecuteBatch(insert_batch))
+        {
+            lg()(Error, SCREEN, "addMessages 批量插入失败 errno:{} errmsg:{}",
+                 stmt.GetError(), mysql_error(getMysql(index)));
+            // 插入全部失败
+            for (auto *r : insert_rows)
+                r->putflag = false;
             return stmt.GetError();
         }
-        std::string recvid = v["recvid"].asString();
-        std::string content = v["content"].asString();
-        // 执行sql语句
-        if (!stmt.Execute(&sendid, &recvid, &content))
-        {
-            lg()(Error, SCREEN, "QQDatabase addMessage Execute failed:{}", stmt.GetError());
-            return stmt.GetError();
-        }
-        // 消息入库成功
         return MESSAGEINMYSQL;
     }
 
     // 处理搜索信息
-    bool handleSearch(Json::Value &searchinfo, long long &userid, std::string &account, int &index)
+    bool handleSearch(Json::Value &searchinfo, long long &userid, std::string &account, std::string &lastaccount, int &index)
     {
         // 获取用户好友信息
-        unsigned int ret = getFriend(searchinfo["friendinfo"], userid, account, index);
+        unsigned int ret = getFriend(searchinfo["friendinfo"], userid, account, lastaccount, index);
         // 获取好友信息失败打印错误码
         if (ret != GETFRIENDSUCCESS)
         {
@@ -945,25 +1090,36 @@ public:
     // 处理注册信息
     unsigned int handleRegister(Json::Value &v, std::string &account, int &idx)
     {
-        // 获取句柄
         MYSQL *mysql = getMysql(idx);
-        // MYSQLSTMT封装函数
         FastStmt stmt(mysql);
-        // 初始化是否完成
         if (!stmt.IsInit())
         {
             lg()(Warning, SCREEN, "QQDatabase handleRegister IsInit failed:{}", mysql_error(mysql));
             return mysql_errno(mysql);
         }
+
         std::string username = v["username"].asString();
         std::string userpassword = v["userpassword"].asString();
         char useraccount[24] = {0};
-        // 看用户有没有用户名
-        if (!v["username"].asString().empty())
+
+        // 第1步：从独立序列取号（auto_increment 是原子的，并发不会撞）
+        if (!stmt.PrePareSql("insert into account_seq(seq) values(default)"))
         {
-            std::string username = v["username"].asString();
-            // 预处理sql语句
-            if (!stmt.PrePareSql("insert into qquser (useraccount,userpassword,username) values(?,?,?);"))
+            lg()(Warning, SCREEN, "QQDatabase handleRegister seq PrePareSql failed:{}", mysql_error(mysql));
+            return stmt.GetError();
+        }
+        if (!stmt.Execute())
+        {
+            lg()(Warning, SCREEN, "QQDatabase handleRegister seq Execute failed:{}", stmt.GetError());
+            return stmt.GetError();
+        }
+        long long seq = mysql_stmt_insert_id(stmt.GetStmt());
+        snprintf(useraccount, 24, "%010lld", seq + 1000000000);
+
+        // 第2步：一次性插入完整账号（useraccount 已经是唯一值，不再冲突）
+        if (!username.empty())
+        {
+            if (!stmt.PrePareSql("insert into qquser(useraccount,userpassword,username) values(?,?,?)"))
             {
                 lg()(Warning, SCREEN, "QQDatabase handleRegister PrePareSql failed:{}", mysql_error(mysql));
                 return stmt.GetError();
@@ -973,24 +1129,10 @@ public:
                 lg()(Warning, SCREEN, "QQDatabase handleRegister Execute failed:{}", stmt.GetError());
                 return stmt.GetError();
             }
-            long long userid = mysql_stmt_insert_id(stmt.GetStmt());
-            snprintf(useraccount, 24, "%010lld", userid + 1000000000);
-            // 预处理sql语句
-            if (!stmt.PrePareSql("update qquser set useraccount=? where userid=?"))
-            {
-                lg()(Warning, SCREEN, "QQDatabase handleRegister PrePareSql failed:{}", mysql_error(mysql));
-                return stmt.GetError();
-            }
-            if (!stmt.Execute(useraccount, &userid))
-            {
-                lg()(Warning, SCREEN, "QQDatabase handleRegister Execute failed:{}", stmt.GetError());
-                return stmt.GetError();
-            }
         }
         else
         {
-            // 预处理sql语句
-            if (!stmt.PrePareSql("insert into qquser (useraccount,userpassword) values(?,?);"))
+            if (!stmt.PrePareSql("insert into qquser(useraccount,userpassword) values(?,?)"))
             {
                 lg()(Warning, SCREEN, "QQDatabase handleRegister PrePareSql failed:{}", mysql_error(mysql));
                 return stmt.GetError();
@@ -1000,22 +1142,8 @@ public:
                 lg()(Warning, SCREEN, "QQDatabase handleRegister Execute failed:{}", stmt.GetError());
                 return stmt.GetError();
             }
-            // 拼接账号
-            long long userid = mysql_stmt_insert_id(stmt.GetStmt());
-            snprintf(useraccount, 24, "%010lld", userid + 1000000000);
-            // 预处理sql语句
-            if (!stmt.PrePareSql("update qquser set useraccount=? where userid=?"))
-            {
-                lg()(Warning, SCREEN, "QQDatabase handleRegister PrePareSql failed:{}", mysql_error(mysql));
-                return stmt.GetError();
-            }
-            if (!stmt.Execute(useraccount, &userid))
-            {
-                lg()(Warning, SCREEN, "QQDatabase handleRegister Execute failed:{}", stmt.GetError());
-                return stmt.GetError();
-            }
         }
-        // 获取账号
+
         account = useraccount;
         return 0;
     }
@@ -1104,7 +1232,7 @@ private:
             return mysql_errno(mysql);
         }
         // 获取会话id和会话最大序列(取会话id中序列大于客户端最大会话序列的所有消息)
-        std::string sql = "select mes.mesid,mes.convid,mes.convseq,mes.sendid,mes.content,mes.sendtime from message AS mes join (";
+        std::string sql = "select mes.mesid,mes.convid,mes.convseq,mes.sendid,mes.content,mes.sendtime,mes.uuid,mes.status from message AS mes join (";
         int i = 1;
         // 构建临时表(所有会话id和会话序列)
         for (auto convvalue : convinfo)
@@ -1112,7 +1240,7 @@ private:
             long long convid = convvalue["convid"].asInt64();
             long long lastseq = convvalue["lastseq"].asInt64();
             // 拼接sql预计构建会话信息临时表
-            if (int i = 1)
+            if (i == 1)
                 sql += "select " + std::to_string(convid) + " AS convid ," + std::to_string(lastseq) + " AS convseq";
             else
                 sql += "UNION ALL select " + std::to_string(convid) + " AS convid ," + std::to_string(lastseq) + " AS convseq";
@@ -1131,7 +1259,9 @@ private:
         long long sendid = -1;
         char content[25536] = {0};
         long long sendtime = 0;
-        if (!stmt.BindResult(&mesid, &convid, &convseq, &sendid, content, &sendtime))
+        char uuid[37] = {0};
+        int8_t status = -1;
+        if (!stmt.BindResult(&mesid, &convid, &convseq, &sendid, content, &sendtime, uuid, &status))
         {
             lg()(Error, SCREEN, "QQDatabase getMes BindResult failed:{}", stmt.GetError());
             return stmt.GetError();
@@ -1170,8 +1300,11 @@ private:
             mes["sendid"] = Json::Int64(sendid);
             mes["content"] = content;
             mes["sendtime"] = Json::Int64(sendtime);
+            mes["uuid"] = uuid;
+            mes["status"] = status;
             // 将消息追加到json数组里面
             offmesarray.append(mes);
+            std::cout << "convid:" << convid << "  convseq" << convseq << std::endl;
         }
         // 返回
         return GETMESSUCCESS;
@@ -1465,13 +1598,12 @@ private:
             v["groupid"] = Json::Int64(groupid);
             v["groupaccount"] = groupaccount;
             v["groupname"] = groupname;
-            std::cout << 2 << std::endl;
             groupinfo.append(v);
         }
         return GETGROUPSUCCESS;
     }
     // 获取用户好友信息
-    unsigned int getFriend(Json::Value &friendinfo, long long &userid, std::string &account, int &index)
+    unsigned int getFriend(Json::Value &friendinfo, long long &userid, std::string &account, std::string &lastaccount, int &index)
     {
         // 获取句柄
         MYSQL *mysql = getMysql(index);
@@ -1484,7 +1616,7 @@ private:
             return mysql_errno(mysql);
         }
         // 预处理sql失败 (不返回用户本身)
-        if (!stmt.PrePareSql("select userid,useraccount,username from qquser where useraccount LIKE CONCAT('%',?,'%') and userid!=?;"))
+        if (!stmt.PrePareSql("select userid,useraccount,username from qquser where useraccount LIKE CONCAT('%',?,'%') and userid!=? and useraccount>? order by useraccount limit 50;"))
         {
             lg()(Error, SCREEN, "QQDatabase getFriend PrePareSql failed:{}", stmt.GetError());
             return stmt.GetError();
@@ -1499,7 +1631,7 @@ private:
             return stmt.GetError();
         }
         // 执行sql语句
-        if (!stmt.Execute(&account, &userid))
+        if (!stmt.Execute(&account, &userid, &lastaccount))
         {
             lg()(Error, SCREEN, "QQDatabase getFriend Execute failed:{}", stmt.GetError());
             return stmt.GetError();
@@ -1548,7 +1680,7 @@ private:
             return mysql_errno(mysql);
         }
         // 预处理sql语句
-        if (!stmt.PrePareSql("select g.groupid,g.convid,g.groupaccount,g.groupname,g.groupremark,m.useridentity from qqgroupmem m inner join qqgroup g on g.groupid=m.groupid where userid=?;"))
+        if (!stmt.PrePareSql("select g.groupid,g.convid,g.groupaccount,g.groupname,g.groupremark,m.useridentity from qqgroupmem m inner join qqgroup g on g.groupid=m.groupid where userid=? LIMIT 50;"))
         {
             lg()(Error, SCREEN, "QQDatabase getGroup PrePareSql failed:{}", stmt.GetError());
             return stmt.GetError();
@@ -1691,6 +1823,13 @@ private:
         {
             exit(2);
         }
+        // 账号取号表
+        if (mysql_query(mysql, R"(create table if not exists account_seq(
+                        seq BIGINT AUTO_INCREMENT PRIMARY KEY
+                        );)"))
+        {
+            exit(2);
+        }
         // 创建群表
         if (mysql_query(mysql, R"(create table if not exists qqgroup(
                         groupid      BIGINT      AUTO_INCREMENT PRIMARY KEY    COMMENT '群id',
@@ -1738,7 +1877,8 @@ private:
                         sendid   BIGINT        NOT NULL                           COMMENT '发送者id',
                         content  VARCHAR(8192) NOT NULL                           COMMENT '消息内容',
                         sendtime BIGINT        NOT NULL                           COMMENT '发送时间',
-                        uuid     char(36)      NOT NULL UNIQUE                    COMMENT 'uuid防重复插入',
+                        uuid     char(64)      NOT NULL UNIQUE                    COMMENT 'uuid防重复插入',
+                        status   TINYINT       NOT NULL DEFAULT 1                 COMMENT '0-发送中,1-消息已送达,2-失败',
                         INDEX idx_convinfo(convid,convseq)                        COMMENT '会话id和序列索引'
                         );)"))
         {

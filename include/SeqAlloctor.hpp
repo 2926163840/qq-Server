@@ -3,6 +3,7 @@
 #include <memory>
 #include <unordered_map>
 #include <array>
+#include <mutex>
 
 #define SEQ_MUTEX_NUM 512
 
@@ -20,7 +21,7 @@ public:
     long long getSeq(long long id)
     {
         // 算出id哈希值获取分片锁下标
-        int idx = std::hash<int>{}(id);
+        int idx = std::hash<long long>{}(id) % SEQ_MUTEX_NUM;
         // 加锁
         std::lock_guard<std::mutex> lock(seqlock.at(idx));
         auto it = alloc.find(id);
@@ -36,7 +37,7 @@ public:
     {
 
         // 算出id哈希值获取分片锁下标
-        int idx = std::hash<int>{}(id);
+        int idx = std::hash<long long>{}(id) % SEQ_MUTEX_NUM;
         // 加锁
         std::lock_guard<std::mutex> lock(seqlock.at(idx));
         // first放插入成功的迭代器失败返回已经存在的key的迭代器 second是是否插入成功
