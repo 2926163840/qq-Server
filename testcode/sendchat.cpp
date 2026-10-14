@@ -16,7 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
-#include <cstdio>s
+#include <cstdio>
 #include <random>
 #include <algorithm>
 #include <sys/socket.h>
@@ -165,7 +165,7 @@ static void worker_sendchat(const std::string &accA, const std::string &accB,
         char uuid[40];
         snprintf(uuid, sizeof(uuid), "%lx%lx", (unsigned long)rng(), (unsigned long)rng());
         std::string msg = "{\"cmd\":\"sendmessage\",\"convid\":" + std::to_string(convid) +
-                          ",\"content\":\"chat " + std::to_string(i) + "\",\"uuid\":\"" + uuid + "\"}";
+                          ",\"content\":\"chat " + std::to_string(i) + "模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小，模拟正常消息数据大小" + "\",\"uuid\":\"" + uuid + "\"}";
         if (!send_json(sockA, msg))
         {
             r.fail += (count - i);

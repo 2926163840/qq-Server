@@ -20,28 +20,110 @@
 #define SENDSUCCESS 10002
 
 #define MAX_PACKET_SIZE 65536
+#define MAX_BYTES (60 * 1024)
 
-// 把 Json 数组按字节切刀，返回分片包容器（消息回执和离线消息共用）
-static std::vector<Json::Value> splitByBytes(const Json::Value &arr, size_t max_bytes)
+// JSON 字符串转义（content 可能含引号/反斜杠/换行/控制字符）
+static std::string jsonEscape(const std::string &s)
 {
-    std::vector<Json::Value> chunks;
-    Json::Value chunk(Json::arrayValue);
-    size_t cur_bytes = 0;
-    for (Json::ArrayIndex i = 0; i < arr.size(); i++)
+    std::string out;
+    out.reserve(s.size() + 16); // 预扩容，防频繁扩容
+    // 遍历每一个字符
+    for (size_t i = 0; i < s.size(); i++)
     {
-        const Json::Value &m = arr[i];
-        size_t msize = m["content"].asString().size() + 256; // content + 字段固定开销
-        if (!chunk.empty() && cur_bytes + msize > max_bytes)
+        unsigned char ch = (unsigned char)s[i];
+        switch (ch)
         {
-            chunks.push_back(chunk);
-            chunk = Json::Value(Json::arrayValue);
-            cur_bytes = 0;
+        case '"':
+            out += "\\\""; // \\\"->\"
+            break;
+        case '\\':
+            out += "\\\\"; //  \\\\->\\
+            break;
+        case '\n':
+            out += "\\n"; // \\n->\n
+            break;
+        case '\r':
+            out += "\\r"; // \\r->\r
+            break;
+        case '\t':
+            out += "\\t"; // \\t->\t
+            break;
+        case '\b':
+            out += "\\b"; // \\b->\b
+            break;
+        case '\f':
+            out += "\\f"; // \\f->\f
+            break;
+        default:
+            // 为不可见字符
+            if (ch < 0x20)
+            {
+                char buf[8];
+                snprintf(buf, sizeof(buf), "\\u%04x", ch); // \\u%04x->\u+不足四位前面补016进制
+                out += buf;
+            }
+            else
+            {
+                out += (char)ch; // UTF-8 多字节原样保留
+            }
         }
-        chunk.append(std::move(m));
-        cur_bytes += msize;
     }
-    if (!chunk.empty())
-        chunks.push_back(chunk);
+    return out;
+}
+
+// MsgRow → 单条消息 JSON 字符串（发消息回执用，手动拼，跳过 jsoncpp）
+static std::string serializeMsgRow(const QQDatabase::MsgRow &row)
+{
+    std::string s;
+    s.reserve(row.content.size() + 128);
+    s += "{\"sendid\":";
+    s += std::to_string(row.sendid); // ={"sendid":
+    s += ",\"convid\":";
+    s += std::to_string(row.convid); // ="convid":
+    s += ",\"convseq\":";
+    s += std::to_string(row.convseq); // ="convseq":
+    s += ",\"content\":\"";
+    s += jsonEscape(row.content);
+    s += "\""; // 对正文单独转义
+    s += ",\"sendtime\":";
+    s += std::to_string(row.sendtime); // ="sendtime":
+    s += ",\"uuid\":\"";
+    s += row.uuid;
+    s += "\"";             // uuid 是程序生成的十六进制，无特殊字符
+    s += ",\"status\":1}"; // 收尾
+    return s;
+}
+
+// 把若干条已序列化的消息字符串按 max_bytes 拼成 JSON 数组字符串分片
+static std::vector<std::string> splitJsonStrings(std::vector<std::string> &items, size_t max_bytes)
+{
+    std::vector<std::string> chunks;
+    std::string buf;
+    buf.reserve(max_bytes + 256);
+    buf += '[';
+    size_t cur = 1;    // 已含 '['
+    bool first = true; // 是否为第一条消息
+    for (auto &item : items)
+    {
+        size_t add = item.size() + (first ? 0 : 1); // 第一条消息加逗号
+        if (!first && cur + add > max_bytes)        // 超限切一刀
+        {
+            buf += ']';                       // 先收尾
+            chunks.push_back(std::move(buf)); // 分片包
+            buf.clear();                      // 清空重新加载
+            buf += '[';                       // 开头
+            cur = 1;
+            first = true;      // 第一条消息
+            add = item.size(); // 第一条没有逗号
+        }
+        if (!first)
+            buf += ','; // 不是第一条加逗号
+        buf += item;    // 追加消息
+        cur += add;     // 记录字节
+        first = false;
+    }
+    buf += ']';
+    chunks.push_back(std::move(buf)); // 最后的分片包收尾
     return chunks;
 }
 
@@ -304,7 +386,7 @@ public:
             batch.swap(thread->db_queue); // 交换，不拷贝
         }
         // 分片批量处理：外层 outnum 次，内层每片最多 100 条
-        const size_t CHUNK = 100;
+        const size_t CHUNK = 200;
         // 总量
         size_t n = batch.size();
         // 处理次数
@@ -349,33 +431,25 @@ public:
         // 回执：putflag=true 的按用户分组
         std::shared_lock<std::shared_mutex> clock(qqinfo->conv_mutex);
         std::shared_lock<std::shared_mutex> olock(qqinfo->online_mutex);
-        std::unordered_map<long long, Json::Value> per_user;
+        std::unordered_map<long long, std::vector<std::string>> per_user;
 
         // 给用户分配消息
         for (auto &row : rows)
         {
             if (!row.putflag)
                 continue;
-            Json::Value m;
-            m["sendid"] = Json::Int64(row.sendid);
-            m["convid"] = Json::Int64(row.convid);
-            m["convseq"] = Json::Int64(row.convseq);
-            m["content"] = std::move(row.content);
-            m["sendtime"] = Json::Int64(row.sendtime);
-            m["uuid"] = row.uuid;
-            m["status"] = 1; // 已送达
 
             // 分配消息接受者
             auto it = qqinfo->conv_touid.find(row.convid);
             if (it == qqinfo->conv_touid.end())
                 continue;
+            std::string msg = serializeMsgRow(row); // 每条x消息序列化一次
             for (const long long &uid : it->second)
                 // 在线才分配消息
                 if (qqinfo->onlineuser.count(uid))
-                    per_user[uid].append(m);
+                    per_user[uid].push_back(msg); // 同一条消息要分发给多人不move
         }
         // 分发，每个用户按字节切刀（60KB），带分片序号
-        const size_t MAX_BYTES = 60 * 1024;
         for (auto &kv : per_user)
         {
             // 用户不在线
@@ -383,19 +457,22 @@ public:
             if (oit == qqinfo->onlineuser.end())
                 continue;
 
-            // 按字节切刀（复用 splitByBytes）
-            const std::vector<Json::Value> &chunks = splitByBytes(kv.second, MAX_BYTES);
+            // 按字节切刀（复用 splitJsonStrings）
+            const std::vector<std::string> &chunks = splitJsonStrings(kv.second, MAX_BYTES);
 
             // 发送每个分片，带 chunk_seq / chunk_total
             for (size_t c = 0; c < chunks.size(); c++)
             {
-                Json::Value resp;
-                resp["cmd"] = "sendmessage_reply";
-                resp["result"] = "sendmessage_success";
-                resp["chunk_seq"] = Json::Int64(c);               // 当前分片数
-                resp["chunk_total"] = Json::Int64(chunks.size()); // 总分片包数
-                resp["meslist"] = std::move(chunks[c]);
-                sendToConn(oit->second, resp);
+                std::string resp;
+                resp.reserve(chunks[c].size() + 128);
+                resp += "{\"cmd\":\"sendmessage_reply\",\"result\":\"sendmessage_success\",\"chunk_seq\":";
+                resp += std::to_string(c);
+                resp += ",\"chunk_total\":";
+                resp += std::to_string(chunks.size());
+                resp += ",\"meslist\":";
+                resp += chunks[c];
+                resp += '}';
+                sendToConn(oit->second, std::move(resp), "sendmessage_reply");
             }
         }
     }
@@ -457,13 +534,11 @@ public:
         auto sendit = qqinfo->onlineuser.find(sendid);
         if (sendit != qqinfo->onlineuser.end())
         {
-            std::cout << "接收端发送成功" << std::endl;
             // 在线发送数据直接发给发送端
             sendToConn(sendit->second->shared_from_this(), senderdata);
             // 发完解锁
             lock.unlock();
         }
-        std::cout << "接收端发送成功" << std::endl;
         // 将数据发送给接收端
         sendToConn(conn->shared_from_this(), recverdata);
     }
@@ -592,21 +667,35 @@ public:
         // 获取完毕
         if (ret == GETMESSUCCESS)
         {
-            // 按字节切刀（复用 splitByBytes），分片发送
-            const size_t MAX_BYTES = 60 * 1024;
-            std::vector<Json::Value> chunks = splitByBytes(offlinemes, MAX_BYTES);
-            // 空离线消息也发一个空包，保持"总是回复"让客户端触发 getSendingMes
-            if (chunks.empty())
-                chunks.push_back(Json::Value(Json::arrayValue));
+            std::vector<std::string> items;
+            items.reserve(offlinemes.size());
+            Json::FastWriter writer;
+            for (auto &m : offlinemes)
+            {
+                std::string one = writer.write(m); // 离线消息每条序列化一次
+                if (!one.empty() && one.back() == '\n')
+                    one.pop_back();
+                items.push_back(std::move(one));
+            }
+
+            std::vector<std::string> chunks;
+            if (items.empty())
+                chunks.push_back("[]"); // 空也发空包，保持"总是回复"
+            else
+                chunks = splitJsonStrings(items, MAX_BYTES);
+
             for (size_t c = 0; c < chunks.size(); c++)
             {
-                Json::Value data;
-                data["cmd"] = "getofflinemes_reply";
-                data["offlinemes"] = std::move(chunks[c]);
-                data["chunk_seq"] = Json::Int64(c);
-                data["chunk_total"] = Json::Int64(chunks.size());
-                // 将离线信息打包发送过去
-                sendToConn(conn->shared_from_this(), data);
+                std::string data;
+                data.reserve(chunks[c].size() + 128);
+                data += "{\"cmd\":\"getofflinemes_reply\",\"offlinemes\":";
+                data += chunks[c];
+                data += ",\"chunk_seq\":";
+                data += std::to_string(c);
+                data += ",\"chunk_total\":";
+                data += std::to_string(chunks.size());
+                data += '}';
+                sendToConn(conn->shared_from_this(), std::move(data), "getofflinemes_reply");
             }
         }
         // 用户是新用户没有会话信息
@@ -765,12 +854,11 @@ public:
         }
     }
 
-    // 将要发送数据的任务投递给对应的用户bev
+    // 将要发送数据的任务投递给对应的用户bev（Json 版，其余命令用）
     void sendToConn(std::shared_ptr<Conn> target, Json::Value &v)
     {
         Json::FastWriter write;
         std::string data = write.write(v);
-
         // 发送前兜底检查：包过大直接拒绝 + 打日志，不硬塞出去
         if (data.size() > MAX_PACKET_SIZE)
         {
@@ -798,18 +886,46 @@ public:
             event_active(target->notify_ev, 0, 0);
     }
 
+    // 将要发送数据的任务投递给对应的用户bev（字符串版，消息回执/离线消息用，跳过 jsoncpp）
+    void sendToConn(std::shared_ptr<Conn> target, std::string &&data, const std::string &cmd)
+    {
+        // 发送前兜底检查：包过大直接拒绝 + 打日志，不硬塞出去
+        if (data.size() > MAX_PACKET_SIZE)
+        {
+            lg()(Error, SCREEN, "sendToConn 包过大拒绝发送 userid:{} cmd:{} size:{}",
+                 target->userid, cmd, data.size());
+            return;
+        }
+        // 发送任务对象
+        SendTask *task = new SendTask;
+        task->conn = target; // 先引用计数+1保活后执行业务
+        task->data = std::move(data);
+        task->userid = target->userid;
+        task->cmd = cmd;
+        // 将任务投递进连接对象发送任务队列中
+        std::lock_guard<std::mutex> lock(target->send_mtx);
+        // 用户期间下线不再推送消息
+        if (!target->alive.load())
+        {
+            delete task;
+            return;
+        }
+        bool need_wake = target->send_queue.empty(); // 不为空说明正在处理任务中不重复唤醒，为空说明空闲
+        target->send_queue.push_back(task);
+        if (need_wake)
+            event_active(target->notify_ev, 0, 0);
+    }
+
     // 消费发送消息任务
     static void drain_cb(evutil_socket_t, short, void *arg)
     {
         Conn *conn = static_cast<Conn *>(arg);
         // 任务容器
-        std::vector<SendTask *> batch;
+        std::deque<SendTask *> batch;
         // 加锁取任务
         {
             std::lock_guard<std::mutex> lock(conn->send_mtx);
-            batch.assign(conn->send_queue.begin(), conn->send_queue.end());
-            // 清空连接对象任务队列
-            conn->send_queue.clear();
+            batch.swap(conn->send_queue);
         }
         // 循环处理任务
         for (auto *t : batch)

@@ -856,6 +856,7 @@ public:
 
         // 1. 分配序列 + 拼 SQL（融合），只收集序列成功的
         std::string sql = "insert into message(convid,convseq,sendid,content,sendtime,uuid) values ";
+        sql.reserve(64 + rows.size() * 14);
         // 批量绑定的字段
         std::vector<std::vector<std::variant<long long, std::string *>>> batch;
         std::vector<MsgRow *> insert_rows;
@@ -895,6 +896,7 @@ public:
 
         // IN 查重：查出已存在的 uuid = 重复包
         std::string insql = "select uuid from message where uuid in (";
+        insql.reserve(40 + batch.size() * 2);
         for (size_t i = 0; i < batch.size(); i++)
         {
             if (i)
