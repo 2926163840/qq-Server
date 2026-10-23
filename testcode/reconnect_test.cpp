@@ -2,6 +2,10 @@
 // 编译：g++ -O2 -std=c++17 -pthread reconnect_test.cpp -o reconnect_test
 // 测法：N 个账号 login 后直接 close（不优雅退出），等几秒重新 login，
 //       看是否还报 login_online（报 = onlineuser 没清理干净）
+
+// 断线重连 / onlineuser 清理
+//./reconnect_test --start 1 --count 200 --password 12345678
+
 #include <iostream>
 #include <string>
 #include <vector>

@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/stress_test.dir/stress_test.cpp.o -o stress_test  -ljsoncpp 

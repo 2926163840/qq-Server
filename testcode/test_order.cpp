@@ -1,3 +1,7 @@
+
+// 消息顺序（convseq 连续递增）
+//./test_order
+
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -9,7 +13,7 @@
 #include <algorithm>
 #include <ctime>
 
-// ★ 改成你自己的
+// ★ 改成要测的
 const std::string ACCOUNT = "1000000015"; // 账号
 const std::string PASSWORD = "12345678";  // 密码
 const long long CONVID = 5;               // 会话id（你要测的那个好友会话）

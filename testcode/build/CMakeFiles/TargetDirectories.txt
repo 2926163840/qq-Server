@@ -1,0 +1,12 @@
+/home/zsy/Server/testcode/build/CMakeFiles/add_friends.dir
+/home/zsy/Server/testcode/build/CMakeFiles/reconnect_test.dir
+/home/zsy/Server/testcode/build/CMakeFiles/sendchat.dir
+/home/zsy/Server/testcode/build/CMakeFiles/soak_test.dir
+/home/zsy/Server/testcode/build/CMakeFiles/stick_packet.dir
+/home/zsy/Server/testcode/build/CMakeFiles/stress_test.dir
+/home/zsy/Server/testcode/build/CMakeFiles/test_client.dir
+/home/zsy/Server/testcode/build/CMakeFiles/test_order.dir
+/home/zsy/Server/testcode/build/CMakeFiles/test_seqalloc.dir
+/home/zsy/Server/testcode/build/CMakeFiles/test_timeout.dir
+/home/zsy/Server/testcode/build/CMakeFiles/edit_cache.dir
+/home/zsy/Server/testcode/build/CMakeFiles/rebuild_cache.dir

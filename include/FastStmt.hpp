@@ -60,7 +60,7 @@ public:
     }
     // 批量绑定：每行是字段列表，字段是 long long 值 或 std::string* 指针（不拷字符串）
     bool ExecuteBatch(const std::vector<std::vector<std::variant<long long, std::string*>>>& rows)
-    {
+    {//                              批量     每批参数数量       值
         vpushbind.clear();
         push = true;
         mysql_stmt_reset(stmt);

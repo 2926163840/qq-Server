@@ -65,7 +65,7 @@ public:
         // 死循环阻塞持续监听
         event_base_dispatch(m_base);
     }
-    // 接受函数
+    // 接收函数
     static void accepter(struct evconnlistener *listener, evutil_socket_t fd, struct sockaddr *addr, int socklen, void *ptr)
     {
         // 获取this

@@ -1,12 +1,13 @@
 // soak_test.cpp —— 长时间稳定性压测（混合负载：持续发消息 + 登录/暴力断连）
 // 编译：g++ -O2 -std=c++17 -pthread soak_test.cpp -o soak_test
-// 运行：./soak_test --accountsA "..." --accountsB "..." --convids "..." \
-//         --threads 37 --churn 2 --duration 3600 --password 12345678
 //
 // 目的：让服务器在持续压力下跑几小时，观察内存(RSS)/文件描述符/连接数是否缓慢泄漏。
 //   - worker_chat : 37 对双方在线，每对循环「发 100 条 → 收 100 条回执」，连接断自动重连
 //   - worker_churn: 反复 login → 直接 close（不优雅退出），测 onlineuser 增删是否平衡
 //   - monitor     : 每 10 秒打印累计统计，观察 QPS 是否稳定、失败是否累积
+
+// 长稳混合负载
+//./soak_test --accountsA "$A" --accountsB "$B" --convids "$C" --threads 37 --churn 2 --rate 5000 --duration 0 --password 12345678
 
 #include <iostream>
 #include <string>

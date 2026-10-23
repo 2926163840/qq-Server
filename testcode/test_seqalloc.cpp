@@ -1,3 +1,7 @@
+
+// 序列分配器单元测试
+//./test_seqalloc
+
 #include "../include/SeqAlloctor.hpp"
 #include <cassert>
 #include <thread>

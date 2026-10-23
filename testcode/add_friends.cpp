@@ -1,3 +1,5 @@
+//./ add_friends-- start 1 --pairs 200 --password 12345678
+
 #include <iostream>
 #include <string>
 #include <vector>

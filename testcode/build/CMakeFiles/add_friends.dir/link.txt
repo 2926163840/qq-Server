@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/add_friends.dir/add_friends.cpp.o -o add_friends  -ljsoncpp 

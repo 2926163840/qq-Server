@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/server.dir/main.cc.o -o server  -levent -levent_pthreads -ljsoncpp -lmysqlclient 

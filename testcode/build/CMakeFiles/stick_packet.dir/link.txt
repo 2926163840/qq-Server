@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/stick_packet.dir/stick_packet.cpp.o -o stick_packet  -ljsoncpp 

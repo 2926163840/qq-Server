@@ -2,6 +2,10 @@
 // 编译：g++ -O2 -std=c++17 -pthread stick_packet.cpp -o stick_packet
 // 粘包：一个连接连发 N 个包，验证服务器正确拆出 N 个完整包
 // 半包：一个包分两次 send，验证服务器等完整包再处理
+
+// 粘包 / 半包测试
+//./stick_packet 20        # 参数是连发的包数，默认 20
+
 #include <iostream>
 #include <string>
 #include <cstring>

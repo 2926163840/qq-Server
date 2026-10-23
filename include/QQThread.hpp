@@ -359,6 +359,7 @@ public:
         // 投递消息入库任务
         qqinfo->threads.at(idx)->postDBTask(t);
     }
+
     // 投递消息任务
     void postDBTask(DBTask *task)
     {
@@ -386,7 +387,7 @@ public:
             batch.swap(thread->db_queue); // 交换，不拷贝
         }
         // 分片批量处理：外层 outnum 次，内层每片最多 100 条
-        const size_t CHUNK = 200;
+        const size_t CHUNK = 100;
         // 总量
         size_t n = batch.size();
         // 处理次数
